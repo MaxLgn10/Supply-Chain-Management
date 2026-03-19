@@ -218,4 +218,3 @@ print(sku_summary.head(10)[["name", "size", "sold", "stocked",
 
 df.to_csv(OUTPUT_DIR + "merged_data.csv", index=False)
 print(f"\nExported merged_data.csv and stockout_flags.csv to {OUTPUT_DIR}")
-print("Done. Next: run 02_forecasting.py")

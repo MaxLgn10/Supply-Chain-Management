@@ -14,8 +14,10 @@
 import numpy as np
 import pandas as pd
 
-# ── Correlation threshold for Level 2 channel anchors ────────────────────────
-CORR_THRESHOLD = 0.85   # only use channels with r >= 0.85 as anchors
+# ── Correction parameters ─────────────────────────────────────────────────────
+CORR_THRESHOLD       = 0.85  # only use channels with r >= 0.85 as anchors
+MIN_ANCHOR_UNITS     = 5     # ignore anchors with fewer than 5 units sold
+MAX_CORRECTION_FACTOR = 3.0  # corrected value never exceeds 3× original
 
 
 def build_channel_clusters(df: pd.DataFrame,
@@ -111,12 +113,16 @@ def apply_lost_sales_correction(df: pd.DataFrame,
         if len(anchors) > 0 and own_share > 0:
             estimates = []
             for _, anc in anchors.iterrows():
+                if anc['units'] < MIN_ANCHOR_UNITS:   # Penny Trap fix
+                    continue
                 a_share = hist_shares.get((pid, ch, anc['size']), 0.0)
                 if a_share > 0:
                     implied_total = anc['units'] / a_share
                     estimates.append(implied_total * own_share)
             if estimates:
-                corrected = max(row['units'], float(np.mean(estimates)))
+                raw = max(row['units'], float(np.mean(estimates)))
+                cap = (row['units'] if row['units'] > 0 else stock) * MAX_CORRECTION_FACTOR
+                corrected = min(raw, cap)
                 level_counts[1] += 1
                 if row['units'] > 0:
                     level1_factors.append(corrected / row['units'])
@@ -140,7 +146,9 @@ def apply_lost_sales_correction(df: pd.DataFrame,
                         l2_estimates.append(stock / sim_st)
 
             if l2_estimates:
-                corrected = max(row['units'], float(np.mean(l2_estimates)))
+                raw = max(row['units'], float(np.mean(l2_estimates)))
+                cap = (row['units'] if row['units'] > 0 else stock) * MAX_CORRECTION_FACTOR
+                corrected = min(raw, cap)
                 level_counts[2] += 1
                 if row['units'] > 0:
                     level2_factors.append(corrected / row['units'])
@@ -149,7 +157,9 @@ def apply_lost_sales_correction(df: pd.DataFrame,
         if corrected is None and stock > 0:
             st = hist_st.get((pid, ch, sz))
             if st is not None and st > 0:
-                corrected = max(row['units'], stock / st)
+                raw = max(row['units'], stock / st)
+                cap = (row['units'] if row['units'] > 0 else stock) * MAX_CORRECTION_FACTOR
+                corrected = min(raw, cap)
                 level_counts[3] += 1
                 if row['units'] > 0:
                     level3_factors.append(corrected / row['units'])

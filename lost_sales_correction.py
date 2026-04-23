@@ -82,12 +82,17 @@ def apply_lost_sales_correction(df: pd.DataFrame,
             hist_st[(pid, ch, sz)] = (valid['units'] / valid['stock_units']).mean()
 
     # ── Apply correction row by row ────────────────────────────────────────────
-    level_counts   = {1: 0, 2: 0, 3: 0, 'unchanged': 0}
+    level_counts   = {1: 0, 2: 0, 3: 0, 'unchanged': 0, 'skipped_no_stock': 0}
     level1_factors = []
     level2_factors = []
     level3_factors = []
+    cap_hits       = 0
 
-    stockout_rows = df[df['stockout']].index
+    # Only correct rows where there was genuine stock on hand.
+    # Rows with stock=0 are "never stocked", not lost-sales scenarios.
+    skipped = df[df['stockout'] & (df['stock_units'] == 0)].index
+    level_counts['skipped_no_stock'] = len(skipped)
+    stockout_rows = df[df['stockout'] & (df['stock_units'] > 0)].index
 
     for idx in stockout_rows:
         row    = df.loc[idx]
@@ -123,6 +128,8 @@ def apply_lost_sales_correction(df: pd.DataFrame,
                 raw = max(row['units'], float(np.mean(estimates)))
                 cap = (row['units'] if row['units'] > 0 else stock) * MAX_CORRECTION_FACTOR
                 corrected = min(raw, cap)
+                if raw >= cap:
+                    cap_hits += 1
                 level_counts[1] += 1
                 if row['units'] > 0:
                     level1_factors.append(corrected / row['units'])
@@ -149,6 +156,8 @@ def apply_lost_sales_correction(df: pd.DataFrame,
                 raw = max(row['units'], float(np.mean(l2_estimates)))
                 cap = (row['units'] if row['units'] > 0 else stock) * MAX_CORRECTION_FACTOR
                 corrected = min(raw, cap)
+                if raw >= cap:
+                    cap_hits += 1
                 level_counts[2] += 1
                 if row['units'] > 0:
                     level2_factors.append(corrected / row['units'])
@@ -160,6 +169,8 @@ def apply_lost_sales_correction(df: pd.DataFrame,
                 raw = max(row['units'], stock / st)
                 cap = (row['units'] if row['units'] > 0 else stock) * MAX_CORRECTION_FACTOR
                 corrected = min(raw, cap)
+                if raw >= cap:
+                    cap_hits += 1
                 level_counts[3] += 1
                 if row['units'] > 0:
                     level3_factors.append(corrected / row['units'])
@@ -170,35 +181,47 @@ def apply_lost_sales_correction(df: pd.DataFrame,
             level_counts['unchanged'] += 1
 
     # ── Summary ───────────────────────────────────────────────────────────────
-    total_so = len(stockout_rows)
+    total_so = max(len(stockout_rows), 1)   # avoid div-by-zero
     before   = df['units'].sum()
     after    = df['units_corrected'].sum()
     tag      = f' – {label}' if label else ''
 
-    print(f"\n{'='*55}")
+    def _lvl_line(name, count, factors):
+        base = f"  {name:<26}: {count:4d} ({count/total_so*100:4.1f}%)"
+        if factors:
+            f = np.asarray(factors)
+            return f"{base}  factor: mean={f.mean():.2f}x  median={np.median(f):.2f}x  p95={np.percentile(f,95):.2f}x"
+        return base
+
+    print(f"\n{'='*70}")
     print(f"  Lost Sales Correction{tag}")
-    print(f"{'='*55}")
+    print(f"{'='*70}")
     print(f"  Stocked-out rows processed : {total_so}")
-    print(f"  Level 1 (cross-size)       : {level_counts[1]:4d} "
-          f"({level_counts[1]/total_so*100:.1f}%)  "
-          f"avg factor = {np.mean(level1_factors):.2f}x" if level1_factors else
-          f"  Level 1 (cross-size)       : {level_counts[1]:4d} "
-          f"({level_counts[1]/total_so*100:.1f}%)")
-    print(f"  Level 2 (cross-channel)    : {level_counts[2]:4d} "
-          f"({level_counts[2]/total_so*100:.1f}%)  "
-          f"avg factor = {np.mean(level2_factors):.2f}x" if level2_factors else
-          f"  Level 2 (cross-channel)    : {level_counts[2]:4d} "
-          f"({level_counts[2]/total_so*100:.1f}%)")
-    print(f"  Level 3 (hist. sell-thru)  : {level_counts[3]:4d} "
-          f"({level_counts[3]/total_so*100:.1f}%)  "
-          f"avg factor = {np.mean(level3_factors):.2f}x" if level3_factors else
-          f"  Level 3 (hist. sell-thru)  : {level_counts[3]:4d} "
-          f"({level_counts[3]/total_so*100:.1f}%)")
+    print(f"  Skipped (stock=0, no sale) : {level_counts['skipped_no_stock']:4d}  "
+          f"← not genuine lost-sales scenarios")
+    print(_lvl_line('Level 1 (cross-size)',      level_counts[1], level1_factors))
+    print(_lvl_line('Level 2 (cross-channel)',   level_counts[2], level2_factors))
+    print(_lvl_line('Level 3 (hist. sell-thru)', level_counts[3], level3_factors))
     print(f"  Unchanged (no data)        : {level_counts['unchanged']:4d} "
-          f"({level_counts['unchanged']/total_so*100:.1f}%)")
-    print(f"  Units before : {before:>8,.0f}")
+          f"({level_counts['unchanged']/total_so*100:.1f}%)  ← contributes downward bias")
+
+    # ── Bias diagnostics ──────────────────────────────────────────────────────
+    corrected_rows = df.loc[stockout_rows]
+    if len(corrected_rows) > 0:
+        st_corr = corrected_rows['units_corrected'] / corrected_rows['stock_units']
+        implausible = (st_corr > 3).sum()
+        print(f"\n  Diagnostics:")
+        print(f"    Cap hits (reached {MAX_CORRECTION_FACTOR}x limit) : {cap_hits:4d} "
+              f"({cap_hits/total_so*100:.1f}%)  ← high count = cap too tight")
+        print(f"    Corrected sell-through (units_corrected/stock):")
+        print(f"      median = {st_corr.median():.2f}x   "
+              f"p95 = {st_corr.quantile(0.95):.2f}x   "
+              f"max = {st_corr.max():.2f}x")
+        print(f"    Implausible (>3x stock)                : {implausible:4d}")
+
+    print(f"\n  Units before : {before:>8,.0f}")
     print(f"  Units after  : {after:>8,.0f}  (Δ = {after-before:+,.0f}, "
           f"+{(after-before)/before*100:.1f}%)")
-    print(f"{'='*55}")
+    print(f"{'='*70}")
 
     return df

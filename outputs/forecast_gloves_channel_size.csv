@@ -1,0 +1,12 @@
+channel_id,size,forecast_ensemble,size_share
+Amsterdam,onesize,24,1.0
+Berlin,onesize,18,1.0
+Brussels,onesize,30,1.0
+Copenhagen,onesize,23,1.0
+Helsinki,onesize,65,1.0
+Madrid,onesize,22,1.0
+Paris,onesize,24,1.0
+Platform,onesize,8,1.0
+Rome,onesize,18,1.0
+Stockholm,onesize,60,1.0
+Webshop,onesize,76,1.0

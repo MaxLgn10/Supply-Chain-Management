@@ -1,0 +1,12 @@
+channel_id,forecast_MA,forecast_SES,forecast_Holt,forecast_LinReg,forecast_ensemble
+Amsterdam,441,436,452,463,447
+Berlin,510,498,567,559,531
+Brussels,638,648,787,704,690
+Copenhagen,972,971,1033,1094,1015
+Helsinki,1004,994,1080,1042,1028
+Madrid,601,599,619,634,612
+Paris,467,461,450,505,471
+Platform,190,180,144,155,168
+Rome,236,238,252,259,245
+Stockholm,982,912,1004,1026,978
+Webshop,2105,2049,2307,2296,2181

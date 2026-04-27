@@ -1,0 +1,12 @@
+channel_id,forecast_MA,forecast_SES,forecast_Holt,forecast_LinReg,forecast_ensemble
+Amsterdam,24,24,26,22,24
+Berlin,18,17,16,22,18
+Brussels,30,31,28,30,30
+Copenhagen,28,26,15,20,23
+Helsinki,65,61,67,68,65
+Madrid,24,23,18,21,22
+Paris,26,24,16,28,24
+Platform,8,9,11,7,8
+Rome,17,16,19,19,18
+Stockholm,64,51,56,68,60
+Webshop,74,82,56,85,76

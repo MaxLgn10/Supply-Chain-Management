@@ -1,0 +1,12 @@
+channel_id,product_id,size,forecast_ensemble,category_group
+Amsterdam,ARCCMK4UZC,onesize,24,gloves
+Berlin,ARCCMK4UZC,onesize,18,gloves
+Brussels,ARCCMK4UZC,onesize,30,gloves
+Copenhagen,ARCCMK4UZC,onesize,23,gloves
+Helsinki,ARCCMK4UZC,onesize,65,gloves
+Madrid,ARCCMK4UZC,onesize,22,gloves
+Paris,ARCCMK4UZC,onesize,24,gloves
+Platform,ARCCMK4UZC,onesize,8,gloves
+Rome,ARCCMK4UZC,onesize,18,gloves
+Stockholm,ARCCMK4UZC,onesize,60,gloves
+Webshop,ARCCMK4UZC,onesize,76,gloves

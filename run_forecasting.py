@@ -204,9 +204,32 @@ def forecast_category(cat_name: str, product_ids: list, df_all: pd.DataFrame):
 
     df_channel_size = pd.DataFrame(rows)
 
-    # ── 6. Export CSVs ────────────────────────────────────────────────────────
+    # ── 6. SKU-level disaggregation ───────────────────────────────────────────
+    # Use last 3 years for shares (more recent = more relevant)
+    df_recent = df[df['season'] >= 2023].copy()
+    sku_size_shares = (df_recent.groupby(['channel_id', 'product_id', 'size'])['units_corrected']
+                       .sum().reset_index())
+    ch_totals = sku_size_shares.groupby('channel_id')['units_corrected'].transform('sum')
+    sku_size_shares['share'] = sku_size_shares['units_corrected'] / ch_totals
+
+    ch_forecast_map = df_channel.set_index('channel_id')['forecast_ensemble'].to_dict()
+    sku_rows = []
+    for _, row in sku_size_shares.iterrows():
+        ch = row['channel_id']
+        if ch in ch_forecast_map:
+            sku_rows.append({
+                'channel_id':        ch,
+                'product_id':        row['product_id'],
+                'size':              row['size'],
+                'forecast_ensemble': round(ch_forecast_map[ch] * row['share']),
+                'category_group':    cat_name,
+            })
+    df_sku = pd.DataFrame(sku_rows)
+
+    # ── 7. Export CSVs ────────────────────────────────────────────────────────
     df_channel.to_csv(f'outputs/forecast_{slug}_channel_total.csv', index=False)
     df_channel_size.to_csv(f'outputs/forecast_{slug}_channel_size.csv', index=False)
+    df_sku.to_csv(f'outputs/forecast_{slug}_sku_size.csv', index=False)
 
     # ── 7. Size-level sanity check ────────────────────────────────────────────
     size_season = (df.groupby(['size', 'season'])['units_corrected']
@@ -329,6 +352,7 @@ def forecast_category(cat_name: str, product_ids: list, df_all: pd.DataFrame):
             ws.freeze_panes = 'A5'
 
     print(f"  Saved: {excel_out}")
+    return df_sku
 
 
 # ── Main: run all categories ──────────────────────────────────────────────────
@@ -339,9 +363,11 @@ if __name__ == '__main__':
 
     print(f"Found {len(categories)} categories: {list(categories.keys())}")
 
-    summary = []
+    summary, all_sku_forecasts = [], []
     for cat_name, product_ids in categories.items():
-        forecast_category(cat_name, product_ids, df_all)
+        df_sku = forecast_category(cat_name, product_ids, df_all)
+        if not df_sku.empty:
+            all_sku_forecasts.append(df_sku)
         slug = slugify(cat_name)
         try:
             total = pd.read_csv(f'outputs/forecast_{slug}_channel_total.csv')
@@ -360,3 +386,9 @@ if __name__ == '__main__':
     print(df_sum.to_string(index=False))
     print(f"\n  Grand total: {df_sum['Forecast 2026'].sum():,} units")
     print(f"{'='*50}")
+
+    if all_sku_forecasts:
+        df_master = pd.concat(all_sku_forecasts, ignore_index=True)
+        df_master.to_csv('outputs/master_forecast_2026.csv', index=False)
+        print(f"\n  Master SKU forecast saved → outputs/master_forecast_2026.csv")
+        print(f"  Rows: {len(df_master):,}  |  Total units: {df_master['forecast_ensemble'].sum():,}")

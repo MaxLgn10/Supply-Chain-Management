@@ -4,7 +4,7 @@ optimalisation.py
 
 Pre-pack optimization for the Sustainable Essentials SCM group assignment.
 
-This script takes the 2026 SKU/channel forecast created by run_forecasting.py and
+This script takes the SKU/channel forecast created by run_forecasting.py and
 builds an integer optimization model for the number and content of pre-packs and
 their allocation to each sales channel.
 
@@ -46,9 +46,6 @@ Model idea:
 
     This avoids a nonlinear model because directly optimizing both pack content
     and pack allocation would create products of decision variables.
-
-Author note:
-    The filename is kept as "optimalisation.py" because that is what was requested.
 """
 
 from __future__ import annotations
@@ -88,9 +85,10 @@ PACK_CREATION_COST = 134.00
 SHORTAGE_PENALTY_PER_UNIT = 10_000.00
 
 # Candidate pack-generation limits.
-MAX_PACK_UNITS = 10000
-MAX_DISTINCT_SKUS_PER_PACK = 10000
-MAX_CANDIDATE_PACKS = 50_000
+MAX_PACK_TYPES = None
+MAX_PACK_UNITS = 100000
+MAX_DISTINCT_SKUS_PER_PACK = 100000
+MAX_CANDIDATE_PACKS = 50_000_000
 
 # The template shown in the assignment starts with one pack row per SKU.
 # Keeping at most one pack type per SKU is a good practical limit for the
@@ -105,8 +103,7 @@ NO_SHORTAGE_BY_DEFAULT = True
 # relaxation bound before Gurobi stops early. Set to 0.1 (10%) to speed up testing; 
 # use 0.01 (1%) or 0.005 (0.5%) or 0 for the final runs.
 MIP_GAP = 0.01
-
-TIME_LIMIT = 28000
+TIME_LIMIT = 36000
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -881,7 +878,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-pack-types",
         type=int,
-        default=None,
+        default=MAX_PACK_TYPES,
         help=(
             "Maximum number of pack types allowed in the solution. "
             "Default: number of forecasted SKUs."

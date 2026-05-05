@@ -1,7 +1,6 @@
 /*
+GROUP 15
 optimalisation_metaheuristic.cpp
-
-C++ translation of optimalisation_metaheuristic.py.
 
 Purpose:
   Metaheuristic pre-pack optimizer for the SCM group assignment. It jointly
@@ -9,19 +8,19 @@ Purpose:
   randomized greedy repair, ALNS-style neighborhood operators, and simulated
   annealing acceptance.
 
-Important translation notes:
-  - This C++ version is intentionally dependency-light and uses only the C++17
-    standard library.
-  - The Python version used pandas and openpyxl for Excel input/output. Standard
-    C++ has no built-in Excel reader/writer, so this translation supports CSV
+Important  notes:
+  - Standard C++ has no built-in Excel reader/writer, so this code supports CSV
     input and CSV output. If --products points to a CSV with columns id,cost,
     product costs are loaded; otherwise all unit costs are set to 1.
-  - The official XLSX solution template filling from the Python version is not
-    implemented here. The optimizer writes the same main CSV outputs.
 
 Compile:
   g++ -std=c++17 -O2 -Wall -Wextra -pedantic optimalisation_metaheuristic.cpp -o
 optimalisation_metaheuristic
+
+compile and run in one line:
+ g++ -std=c++17 -O2 optimalisation_metaheuristic.cpp -o
+ "$env:TEMP\optimalisation_metaheuristic.exe"; &
+"$env:TEMP\optimalisation_metaheuristic.exe"
 
 Run:
   ./optimalisation_metaheuristic
@@ -29,18 +28,24 @@ Run:
 Recommended stronger run:
   ./optimalisation_metaheuristic --iterations 50000 --restarts 8 --time-limit
 1800
+
+For more info about all parameters, run:
+  ./optimalisation_metaheuristic --help
 */
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <random>
@@ -68,6 +73,8 @@ static constexpr int MAX_PACK_UNITS = 10000;
 static constexpr int MAX_DISTINCT_SKUS_PER_PACK = 10000;
 static constexpr int MAX_REPAIR_STEPS_PER_CHANNEL = 20000;
 static constexpr int PRUNE_PASSES = 3;
+static constexpr int FINAL_PRUNE_PASSES = 20;
+static constexpr int POLISH_ITERATIONS = 5;
 
 // =============================================================================
 // Data structures
@@ -137,6 +144,8 @@ struct Args {
   std::optional<int> max_pack_types;
   int min_forecast = 1;
   bool export_solution = true;
+  bool allow_shortage = true;
+  bool adaptive_weights = true;
 };
 
 // =============================================================================
@@ -557,7 +566,18 @@ static std::vector<std::vector<int>> shipped_matrix(const Solution &sol,
   return shipped;
 }
 
-static double evaluate(Solution &sol, const ProblemData &data) {
+static double shortage_unit_cost(int under, double unit_cost,
+                                 const bool allow_shortage) {
+  if (under <= 0)
+    return 0.0;
+  else if (allow_shortage)
+    return under * unit_cost;
+  else
+    return under * SHORTAGE_PENALTY_PER_UNIT;
+}
+
+static double evaluate(Solution &sol, const ProblemData &data,
+                       const bool allow_shortage) {
   int n_skus = static_cast<int>(data.sku_ids.size());
   int n_channels = static_cast<int>(data.channel_ids.size());
   auto shipped = shipped_matrix(sol, data);
@@ -575,6 +595,7 @@ static double evaluate(Solution &sol, const ProblemData &data) {
   long long over_units = 0;
   long long under_units = 0;
   long long shipped_units = 0;
+  double shortage_cost = 0.0;
   double capital_cost = 0.0;
   for (int s = 0; s < n_skus; ++s) {
     for (int c = 0; c < n_channels; ++c) {
@@ -585,6 +606,8 @@ static double evaluate(Solution &sol, const ProblemData &data) {
       int under = std::max(0, dem - sent);
       over_units += over;
       under_units += under;
+      shortage_cost +=
+          shortage_unit_cost(under, data.unit_cost[s], allow_shortage);
       capital_cost += over * data.unit_cost[s] * COST_OF_CAPITAL;
     }
   }
@@ -592,7 +615,7 @@ static double evaluate(Solution &sol, const ProblemData &data) {
   sol.setup_cost = active_pack_types * PACK_CREATION_COST;
   sol.handling_cost = allocated_packs * HANDLING_COST_PER_PACK;
   sol.capital_cost = capital_cost;
-  sol.shortage_cost = under_units * SHORTAGE_PENALTY_PER_UNIT;
+  sol.shortage_cost = shortage_cost;
   sol.cost =
       sol.setup_cost + sol.handling_cost + sol.capital_cost + sol.shortage_cost;
   sol.overstock_units = over_units;
@@ -605,9 +628,10 @@ static double evaluate(Solution &sol, const ProblemData &data) {
 static double delta_add_one_pack(const std::vector<int> &content_vec,
                                  const std::vector<int> &shipped_col,
                                  const std::vector<int> &demand_col,
-                                 const std::vector<double> &unit_cost) {
+                                 const std::vector<double> &unit_cost,
+                                 const bool allow_shortage) {
   double delta_capital = 0.0;
-  long long delta_shortage_units = 0;
+  double delta_shortage = 0.0;
   for (std::size_t s = 0; s < content_vec.size(); ++s) {
     int before_over = std::max(0, shipped_col[s] - demand_col[s]);
     int before_under = std::max(0, demand_col[s] - shipped_col[s]);
@@ -616,18 +640,20 @@ static double delta_add_one_pack(const std::vector<int> &content_vec,
     int after_under = std::max(0, demand_col[s] - after);
     delta_capital +=
         (after_over - before_over) * unit_cost[s] * COST_OF_CAPITAL;
-    delta_shortage_units += (after_under - before_under);
+    delta_shortage +=
+        shortage_unit_cost(after_under, unit_cost[s], allow_shortage) -
+        shortage_unit_cost(before_under, unit_cost[s], allow_shortage);
   }
-  return HANDLING_COST_PER_PACK + delta_capital +
-         delta_shortage_units * SHORTAGE_PENALTY_PER_UNIT;
+  return HANDLING_COST_PER_PACK + delta_capital + delta_shortage;
 }
 
 static double delta_remove_one_pack(const std::vector<int> &content_vec,
                                     const std::vector<int> &shipped_col,
                                     const std::vector<int> &demand_col,
-                                    const std::vector<double> &unit_cost) {
+                                    const std::vector<double> &unit_cost,
+                                    const bool allow_shortage) {
   double delta_capital = 0.0;
-  long long delta_shortage_units = 0;
+  double delta_shortage = 0.0;
   for (std::size_t s = 0; s < content_vec.size(); ++s) {
     int before_over = std::max(0, shipped_col[s] - demand_col[s]);
     int before_under = std::max(0, demand_col[s] - shipped_col[s]);
@@ -636,15 +662,39 @@ static double delta_remove_one_pack(const std::vector<int> &content_vec,
     int after_under = std::max(0, demand_col[s] - after);
     delta_capital +=
         (after_over - before_over) * unit_cost[s] * COST_OF_CAPITAL;
-    delta_shortage_units += (after_under - before_under);
+    delta_shortage +=
+        shortage_unit_cost(after_under, unit_cost[s], allow_shortage) -
+        shortage_unit_cost(before_under, unit_cost[s], allow_shortage);
   }
-  return -HANDLING_COST_PER_PACK + delta_capital +
-         delta_shortage_units * SHORTAGE_PENALTY_PER_UNIT;
+  return -HANDLING_COST_PER_PACK + delta_capital + delta_shortage;
 }
 
 // =============================================================================
 // Construction and repair
 // =============================================================================
+static Solution remove_inactive_pack_rows(const Solution &sol) {
+  Solution out;
+
+  for (size_t p = 0; p < sol.content.size(); ++p) {
+    int content_sum = 0;
+    for (int qty : sol.content[p]) {
+      content_sum += qty;
+    }
+
+    int allocation_sum = 0;
+    for (int qty : sol.alloc[p]) {
+      allocation_sum += qty;
+    }
+
+    if (content_sum > 0 && allocation_sum > 0) {
+      out.content.push_back(sol.content[p]);
+      out.alloc.push_back(sol.alloc[p]);
+      out.names.push_back(sol.names[p]);
+    }
+  }
+
+  return out;
+}
 
 static Solution remove_empty_pack_rows(const Solution &sol) {
   if (sol.content.empty())
@@ -662,7 +712,8 @@ static Solution remove_empty_pack_rows(const Solution &sol) {
   return out;
 }
 
-static Solution create_single_sku_initial_solution(ProblemData &data) {
+static Solution create_single_sku_initial_solution(const ProblemData &data,
+                                                   bool allow_shortage) {
   int n_skus = static_cast<int>(data.sku_ids.size());
   int n_channels = static_cast<int>(data.channel_ids.size());
   Solution sol;
@@ -674,7 +725,7 @@ static Solution create_single_sku_initial_solution(ProblemData &data) {
     sol.alloc[s] = data.demand[s];
     sol.names.push_back("single_" + slugify(data.sku_ids[s]));
   }
-  evaluate(sol, data);
+  evaluate(sol, data, allow_shortage);
   return sol;
 }
 
@@ -839,7 +890,9 @@ static Solution append_pack(Solution sol, std::vector<int> pack,
 }
 
 static Solution repair_allocation(Solution sol, const ProblemData &data,
-                                  std::mt19937 &rng) {
+                                  std::mt19937 &rng,
+                                  const bool allow_shortage = true,
+                                  int prune_passes = PRUNE_PASSES) {
   if (sol.content.empty())
     return sol;
 
@@ -897,8 +950,8 @@ static Solution repair_allocation(Solution sol, const ProblemData &data,
         if (covered_shortage <= 0)
           continue;
 
-        double delta =
-            delta_add_one_pack(pack, shipped_col, demand_col, data.unit_cost);
+        double delta = delta_add_one_pack(pack, shipped_col, demand_col,
+                                          data.unit_cost, allow_shortage);
         double score = delta - rand01(rng) * 0.01 * covered_shortage;
         best.push_back({score, delta, p_idx});
       }
@@ -921,7 +974,7 @@ static Solution repair_allocation(Solution sol, const ProblemData &data,
     }
   }
 
-  for (int pass = 0; pass < PRUNE_PASSES; ++pass) {
+  for (int pass = 0; pass < prune_passes; ++pass) {
     bool improved = false;
     shipped = shipped_matrix(sol, data);
     std::vector<std::pair<int, int>> pairs;
@@ -940,8 +993,9 @@ static Solution repair_allocation(Solution sol, const ProblemData &data,
           shipped_col[s] = shipped[s][c_idx];
           demand_col[s] = data.demand[s][c_idx];
         }
-        double delta = delta_remove_one_pack(sol.content[p_idx], shipped_col,
-                                             demand_col, data.unit_cost);
+        double delta =
+            delta_remove_one_pack(sol.content[p_idx], shipped_col, demand_col,
+                                  data.unit_cost, allow_shortage);
         if (delta < -1e-9) {
           sol.alloc[p_idx][c_idx]--;
           for (int s = 0; s < n_skus; ++s)
@@ -957,36 +1011,60 @@ static Solution repair_allocation(Solution sol, const ProblemData &data,
   }
 
   sol = remove_empty_pack_rows(sol);
-  evaluate(sol, data);
+  evaluate(sol, data, allow_shortage);
   return sol;
 }
 
-static Solution greedy_construct_solution(ProblemData &data, std::mt19937 &rng,
-                                          int n_seed_packs) {
-  Solution sol = create_single_sku_initial_solution(data);
+static Solution greedy_construct_solution(const ProblemData &data,
+                                          std::mt19937 &rng, int n_seed_packs,
+                                          const bool allow_shortage) {
+  Solution sol = create_single_sku_initial_solution(data, allow_shortage);
   for (int i = 0; i < n_seed_packs; ++i) {
     auto [pack, name] = create_random_curve_pack(data, rng);
     sol = append_pack(std::move(sol), std::move(pack), name);
   }
-  sol = repair_allocation(std::move(sol), data, rng);
-  evaluate(sol, data);
+  sol = repair_allocation(std::move(sol), data, rng, allow_shortage);
+  evaluate(sol, data, allow_shortage);
   return sol;
 }
 
+static Solution final_polish_solution(Solution best, const ProblemData &data,
+                                      std::mt19937 &rng,
+                                      const bool allow_shortage) {
+  evaluate(best, data, allow_shortage);
+  Solution best_polished = best;
+
+  for (int round = 0; round < POLISH_ITERATIONS; ++round) {
+    Solution candidate = repair_allocation(best_polished, data, rng,
+                                           allow_shortage, FINAL_PRUNE_PASSES);
+
+    candidate = remove_inactive_pack_rows(candidate);
+    evaluate(candidate, data, allow_shortage);
+
+    if (candidate.cost < best_polished.cost - 1e-9) {
+      best_polished = candidate;
+    } else {
+      break;
+    }
+  }
+
+  return best_polished;
+}
 // =============================================================================
 // Neighborhood operators
 // =============================================================================
 
 static Solution op_add_curve_pack(const Solution &sol, const ProblemData &data,
-                                  std::mt19937 &rng) {
+                                  std::mt19937 &rng,
+                                  const bool allow_shortage) {
   Solution next = sol;
   auto [pack, name] = create_random_curve_pack(data, rng);
   next = append_pack(std::move(next), std::move(pack), name);
-  return repair_allocation(std::move(next), data, rng);
+  return repair_allocation(std::move(next), data, rng, allow_shortage);
 }
 
 static Solution op_remove_pack(const Solution &sol, const ProblemData &data,
-                               std::mt19937 &rng) {
+                               std::mt19937 &rng, const bool allow_shortage) {
   if (sol.content.size() <= 1)
     return sol;
   Solution next = sol;
@@ -1009,12 +1087,13 @@ static Solution op_remove_pack(const Solution &sol, const ProblemData &data,
   next.content.erase(next.content.begin() + idx);
   next.alloc.erase(next.alloc.begin() + idx);
   next.names.erase(next.names.begin() + idx);
-  return repair_allocation(std::move(next), data, rng);
+  return repair_allocation(std::move(next), data, rng, allow_shortage);
 }
 
 static Solution op_mutate_pack_content(const Solution &sol,
                                        const ProblemData &data,
-                                       std::mt19937 &rng) {
+                                       std::mt19937 &rng,
+                                       const bool allow_shortage) {
   if (sol.content.empty())
     return sol;
   Solution next = sol;
@@ -1120,11 +1199,11 @@ static Solution op_mutate_pack_content(const Solution &sol,
 
   next.content[p] = std::move(pack);
   next.names[p] = "mut_" + next.names[p];
-  return repair_allocation(std::move(next), data, rng);
+  return repair_allocation(std::move(next), data, rng, allow_shortage);
 }
 
 static Solution op_merge_packs(const Solution &sol, const ProblemData &data,
-                               std::mt19937 &rng) {
+                               std::mt19937 &rng, const bool allow_shortage) {
   if (sol.content.size() < 2)
     return sol;
   Solution next = sol;
@@ -1152,11 +1231,11 @@ static Solution op_merge_packs(const Solution &sol, const ProblemData &data,
     next.alloc.erase(next.alloc.begin() + remove_idx);
     next.names.erase(next.names.begin() + remove_idx);
   }
-  return repair_allocation(std::move(next), data, rng);
+  return repair_allocation(std::move(next), data, rng, allow_shortage);
 }
 
 static Solution op_split_pack(const Solution &sol, const ProblemData &data,
-                              std::mt19937 &rng) {
+                              std::mt19937 &rng, const bool allow_shortage) {
   if (sol.content.empty())
     return sol;
   Solution next = sol;
@@ -1205,11 +1284,11 @@ static Solution op_split_pack(const Solution &sol, const ProblemData &data,
   next = append_pack(std::move(next), std::move(pack2),
                      "split_b_" + std::to_string(p));
   next.alloc.back() = old_alloc;
-  return repair_allocation(std::move(next), data, rng);
+  return repair_allocation(std::move(next), data, rng, allow_shortage);
 }
 
 static Solution op_reallocate(const Solution &sol, const ProblemData &data,
-                              std::mt19937 &rng) {
+                              std::mt19937 &rng, const bool allow_shortage) {
   if (sol.content.empty())
     return sol;
   Solution next = sol;
@@ -1224,11 +1303,11 @@ static Solution op_reallocate(const Solution &sol, const ProblemData &data,
       next.alloc[p][c] += randint(rng, 1, 3);
     }
   }
-  return repair_allocation(std::move(next), data, rng);
+  return repair_allocation(std::move(next), data, rng, allow_shortage);
 }
 
 using OperatorFn = Solution (*)(const Solution &, const ProblemData &,
-                                std::mt19937 &);
+                                std::mt19937 &, const bool);
 
 struct OperatorDef {
   std::string name;
@@ -1260,16 +1339,15 @@ choose_operator(std::mt19937 &rng,
 // Metaheuristic optimizer
 // =============================================================================
 
-static Solution
-enforce_pack_type_limit(Solution sol, const ProblemData &data,
-                        std::mt19937 &rng,
-                        const std::optional<int> &max_pack_types) {
+static Solution enforce_pack_type_limit(
+    Solution sol, const ProblemData &data, std::mt19937 &rng,
+    const std::optional<int> &max_pack_types, const bool allow_shortage) {
   if (!max_pack_types.has_value())
     return sol;
   sol = remove_empty_pack_rows(sol);
 
   while (static_cast<int>(sol.content.size()) > *max_pack_types) {
-    evaluate(sol, data);
+    evaluate(sol, data, allow_shortage);
     std::vector<long long> usage(sol.alloc.size(), 0);
     for (std::size_t p = 0; p < sol.alloc.size(); ++p)
       usage[p] = sum_vector(sol.alloc[p]);
@@ -1283,46 +1361,69 @@ enforce_pack_type_limit(Solution sol, const ProblemData &data,
     sol.content.erase(sol.content.begin() + idx);
     sol.alloc.erase(sol.alloc.begin() + idx);
     sol.names.erase(sol.names.begin() + idx);
-    sol = repair_allocation(std::move(sol), data, rng);
+    sol = repair_allocation(std::move(sol), data, rng, allow_shortage);
   }
   return sol;
 }
 
+static std::mutex cout_mutex;
+
 static std::pair<Solution, std::vector<LogRow>>
-optimize_metaheuristic(ProblemData &data, int iterations, int restarts,
+optimize_metaheuristic(const ProblemData &data, int iterations, int restarts,
                        int seed, double initial_temperature,
                        double cooling_rate, int n_seed_packs,
                        const std::optional<int> &time_limit,
-                       const std::optional<int> &max_pack_types) {
+                       const std::optional<int> &max_pack_types,
+                       const bool allow_shortage, const bool adaptive_weights) {
   auto start = std::chrono::steady_clock::now();
   std::mt19937 global_rng(seed);
-
-  std::optional<Solution> best_global;
-  std::vector<LogRow> log_rows;
 
   std::unordered_map<std::string, double> base_weights;
   for (const auto &op : OPERATORS)
     base_weights[op.name] = op.base_weight;
 
+  std::vector<uint32_t> restart_seeds;
   for (int restart = 1; restart <= restarts; ++restart) {
-    std::mt19937 rng(static_cast<uint32_t>(randint(global_rng, 1, 1000000000)));
+    restart_seeds.push_back(
+        static_cast<uint32_t>(randint(global_rng, 1, 1000000000)));
+  }
 
-    Solution current = greedy_construct_solution(data, rng, n_seed_packs);
-    current =
-        enforce_pack_type_limit(std::move(current), data, rng, max_pack_types);
-    current = repair_allocation(std::move(current), data, rng);
-    evaluate(current, data);
+  std::mutex global_best_mutex;
+  double best_global_cost = std::numeric_limits<double>::infinity();
+
+  auto run_restart =
+      [&](int restart,
+          uint32_t r_seed) -> std::pair<Solution, std::vector<LogRow>> {
+    std::mt19937 rng(r_seed);
+
+    Solution current =
+        greedy_construct_solution(data, rng, n_seed_packs, allow_shortage);
+    current = enforce_pack_type_limit(std::move(current), data, rng,
+                                      max_pack_types, allow_shortage);
+    current = repair_allocation(std::move(current), data, rng, allow_shortage);
+    evaluate(current, data, allow_shortage);
 
     Solution best_restart = current;
+    {
+      std::lock_guard<std::mutex> lock(global_best_mutex);
+      if (best_restart.cost < best_global_cost) {
+        best_global_cost = best_restart.cost;
+      }
+    }
+
     double temperature = initial_temperature;
     auto operator_weights = base_weights;
+
+    std::vector<LogRow> local_log_rows;
 
     int last_update = -1;
     for (int it = 1; it <= iterations; ++it) {
 
       int progress = (it * 100) / iterations;
       if (progress % 5 == 0 && progress > last_update) {
-        std::cout << progress << "% of iterations completed" << std::endl;
+        std::lock_guard<std::mutex> lock(cout_mutex);
+        std::cout << "Restart " << std::setw(2) << restart << ": " << progress
+                  << "% completed\n";
         last_update = progress;
       }
 
@@ -1330,11 +1431,12 @@ optimize_metaheuristic(ProblemData &data, int iterations, int restarts,
         break;
 
       auto [op_name, op_fn] = choose_operator(rng, operator_weights);
-      Solution candidate = op_fn(current, data, rng);
+      Solution candidate = op_fn(current, data, rng, allow_shortage);
       candidate = enforce_pack_type_limit(std::move(candidate), data, rng,
-                                          max_pack_types);
-      candidate = repair_allocation(std::move(candidate), data, rng);
-      evaluate(candidate, data);
+                                          max_pack_types, allow_shortage);
+      candidate =
+          repair_allocation(std::move(candidate), data, rng, allow_shortage);
+      evaluate(candidate, data, allow_shortage);
 
       double delta = candidate.cost - current.cost;
       bool accepted = false;
@@ -1349,10 +1451,14 @@ optimize_metaheuristic(ProblemData &data, int iterations, int restarts,
 
       if (candidate.cost < best_restart.cost) {
         best_restart = candidate;
-        operator_weights[op_name] = operator_weights[op_name] * 1.03;
+        double weight = (adaptive_weights) ? 1.03 : 1.00;
+        operator_weights[op_name] = operator_weights[op_name] * weight;
+
+        std::lock_guard<std::mutex> lock(global_best_mutex);
+        if (best_restart.cost < best_global_cost) {
+          best_global_cost = best_restart.cost;
+        }
       }
-      if (!best_global.has_value() || best_restart.cost < best_global->cost)
-        best_global = best_restart;
 
       if (it % 250 == 0 || it == 1) {
         LogRow row;
@@ -1361,39 +1467,71 @@ optimize_metaheuristic(ProblemData &data, int iterations, int restarts,
         row.op = op_name;
         row.current_cost = current.cost;
         row.restart_best_cost = best_restart.cost;
-        row.global_best_cost = best_global
-                                   ? best_global->cost
-                                   : std::numeric_limits<double>::quiet_NaN();
+
+        {
+          std::lock_guard<std::mutex> lock(global_best_mutex);
+          row.global_best_cost =
+              best_global_cost == std::numeric_limits<double>::infinity()
+                  ? std::numeric_limits<double>::quiet_NaN()
+                  : best_global_cost;
+        }
+
         row.temperature = temperature;
         row.pack_types_current = static_cast<int>(current.content.size());
         row.pack_types_best = static_cast<int>(best_restart.content.size());
         row.shortage_units_best = best_restart.shortage_units;
         row.overstock_units_best = best_restart.overstock_units;
         row.elapsed_seconds = seconds_since(start);
-        log_rows.push_back(std::move(row));
+        local_log_rows.push_back(std::move(row));
       }
 
       temperature *= cooling_rate;
     }
 
-    std::cout << "Restart " << std::setw(2) << restart << "/" << restarts
-              << ": best cost=" << std::fixed << std::setprecision(2)
-              << best_restart.cost << ", packs=" << best_restart.content.size()
-              << ", allocated=" << best_restart.allocated_packs
-              << ", over=" << best_restart.overstock_units
-              << ", short=" << best_restart.shortage_units << "\n";
+    {
+      std::lock_guard<std::mutex> lock(cout_mutex);
+      std::cout << "Restart " << std::setw(2) << restart << "/" << restarts
+                << ": best cost=" << std::fixed << std::setprecision(2)
+                << best_restart.cost
+                << ", packs=" << best_restart.content.size()
+                << ", allocated=" << best_restart.allocated_packs
+                << ", over=" << best_restart.overstock_units
+                << ", short=" << best_restart.shortage_units << "\n";
 
-    if (time_limit.has_value() && seconds_since(start) >= *time_limit) {
-      std::cout << "Time limit reached.\n";
-      break;
+      if (time_limit.has_value() && seconds_since(start) >= *time_limit) {
+        std::cout << "Restart " << std::setw(2) << restart
+                  << " time limit reached.\n";
+      }
     }
+
+    return {std::move(best_restart), std::move(local_log_rows)};
+  };
+
+  std::vector<std::future<std::pair<Solution, std::vector<LogRow>>>> futures;
+  for (int restart = 1; restart <= restarts; ++restart) {
+    futures.push_back(std::async(std::launch::async, run_restart, restart,
+                                 restart_seeds[restart - 1]));
+  }
+
+  std::optional<Solution> best_global;
+  std::vector<LogRow> log_rows;
+
+  for (auto &f : futures) {
+    auto [best_restart, local_log_rows] = f.get();
+    if (!best_global.has_value() || best_restart.cost < best_global->cost) {
+      best_global = std::move(best_restart);
+    }
+    log_rows.insert(log_rows.end(),
+                    std::make_move_iterator(local_log_rows.begin()),
+                    std::make_move_iterator(local_log_rows.end()));
   }
 
   if (!best_global.has_value())
     throw std::runtime_error("Metaheuristic did not produce a solution.");
   std::mt19937 final_rng(static_cast<uint32_t>(seed + 999));
-  Solution best = repair_allocation(*best_global, data, final_rng);
-  evaluate(best, data);
+  Solution best =
+      repair_allocation(*best_global, data, final_rng, allow_shortage);
+  evaluate(best, data, allow_shortage);
   return {best, log_rows};
 }
 
@@ -1485,13 +1623,15 @@ static void write_diagnostics_csv(const fs::path &path, const Solution &sol,
 
 static void write_cost_summary_csv(const fs::path &path, const Solution &sol,
                                    const ProblemData &data,
-                                   const std::vector<int> &active) {
+                                   const std::vector<int> &active,
+                                   const bool allow_shortage) {
   auto shipped = shipped_matrix(sol, data);
   long long total_forecast = 0;
   long long total_shipped = 0;
   long long total_over = 0;
   long long total_under = 0;
   double capital_cost = 0.0;
+  double shortage_cost = 0.0;
   for (std::size_t s = 0; s < data.sku_ids.size(); ++s) {
     for (std::size_t c = 0; c < data.channel_ids.size(); ++c) {
       int forecast = data.demand[s][c];
@@ -1503,6 +1643,8 @@ static void write_cost_summary_csv(const fs::path &path, const Solution &sol,
       total_over += over;
       total_under += under;
       capital_cost += over * data.unit_cost[s] * COST_OF_CAPITAL;
+      shortage_cost +=
+          shortage_unit_cost(under, data.unit_cost[s], allow_shortage);
     }
   }
   long long total_allocated_packs = 0;
@@ -1511,7 +1653,6 @@ static void write_cost_summary_csv(const fs::path &path, const Solution &sol,
   long long total_pack_types = static_cast<long long>(active.size());
   double setup_cost = total_pack_types * PACK_CREATION_COST;
   double handling_cost = total_allocated_packs * HANDLING_COST_PER_PACK;
-  double shortage_cost = total_under * SHORTAGE_PENALTY_PER_UNIT;
   double total_cost = setup_cost + handling_cost + capital_cost + shortage_cost;
   double baseline_no_packs_cost = total_forecast * HANDLING_COST_PER_PACK;
 
@@ -1553,11 +1694,12 @@ static void write_run_log_csv(const fs::path &path,
 
 static void export_solution(const Solution &sol_in, const ProblemData &data,
                             const std::string &output_dir,
-                            const std::vector<LogRow> &run_log) {
+                            const std::vector<LogRow> &run_log,
+                            const bool allow_shortage) {
   fs::path out_dir(output_dir);
   fs::create_directories(out_dir);
   Solution sol = sol_in;
-  evaluate(sol, data);
+  evaluate(sol, data, allow_shortage);
   auto active = active_pack_indices(sol);
 
   write_packs_csv(out_dir / "optimalisation_packs_metaheuristic.csv", sol, data,
@@ -1571,7 +1713,7 @@ static void export_solution(const Solution &sol_in, const ProblemData &data,
       out_dir / "optimalisation_diagnostics_metaheuristic.csv", sol, data);
   write_cost_summary_csv(out_dir /
                              "optimalisation_cost_summary_metaheuristic.csv",
-                         sol, data, active);
+                         sol, data, active, allow_shortage);
   write_run_log_csv(out_dir / "optimalisation_run_log.csv", run_log);
 
   std::cout << "\nCSV outputs written to: " << out_dir.string() << "\n";
@@ -1607,6 +1749,10 @@ static void print_usage(const char *exe) {
       << "  --min-forecast N             Ignore SKUs with total forecast below "
          "this value\n"
       << "  --no-export                  Do not write CSV outputs\n"
+      << "  --no-shortage                No shortage allowed in the final "
+         "solution\n"
+      << "  --no-adaptive-weights        Disable adaptive weights for "
+         "operators in metaheuristic\n"
       << "  --help                       Show this help\n";
 }
 
@@ -1650,6 +1796,10 @@ static Args parse_args(int argc, char **argv) {
       args.min_forecast = std::stoi(need_value(key));
     else if (key == "--no-export")
       args.export_solution = false;
+    else if (key == "--no-shortage")
+      args.allow_shortage = false;
+    else if (key == "--no-adaptive-weights")
+      args.adaptive_weights = false;
     else
       throw std::runtime_error("Unknown argument: " + key);
   }
@@ -1683,15 +1833,20 @@ int main(int argc, char **argv) {
               << "\n";
     std::cout << "Iterations/restarts  : " << args.iterations << " x "
               << args.restarts << "\n";
+    std::cout << "Shortage allowed     : "
+              << (args.allow_shortage ? std::string("Yes") : std::string("No"))
+              << "\n";
+    std::cout << "Adaptive weights     : "
+              << (args.adaptive_weights ? std::string("Yes")
+                                        : std::string("No"))
+              << "\n";
     std::cout << std::string(78, '=') << "\n";
 
     auto [best, run_log] = optimize_metaheuristic(
         data, args.iterations, args.restarts, args.seed,
         args.initial_temperature, args.cooling_rate, args.seed_packs,
-        args.time_limit, args.max_pack_types);
-
-    if (args.export_solution)
-      export_solution(best, data, args.output_dir, run_log);
+        args.time_limit, args.max_pack_types, args.allow_shortage,
+        args.adaptive_weights);
 
     std::cout << "\nFinal solution:\n";
     std::cout << "  total cost       : " << std::fixed << std::setprecision(2)
@@ -1705,6 +1860,34 @@ int main(int argc, char **argv) {
     std::cout << "  overstock units  : " << best.overstock_units << "\n";
     std::cout << "  shortage units   : " << best.shortage_units << "\n";
     std::cout << "\nDone.\n";
+
+    std::mt19937 polish_rng(args.seed + 999);
+    Solution best_polished =
+        final_polish_solution(best, data, polish_rng, args.allow_shortage);
+    best_polished = remove_inactive_pack_rows(best_polished);
+    evaluate(best_polished, data, args.allow_shortage);
+
+    if (args.export_solution)
+      export_solution(best_polished, data, args.output_dir, run_log,
+                      args.allow_shortage);
+
+    std::cout << "\nFinal polished solution:\n";
+    std::cout << "  total cost       : " << std::fixed << std::setprecision(2)
+              << best_polished.cost << "\n";
+    std::cout << "  setup cost       : " << best_polished.setup_cost << "\n";
+    std::cout << "  handling cost    : " << best_polished.handling_cost << "\n";
+    std::cout << "  capital cost     : " << best_polished.capital_cost << "\n";
+    std::cout << "  shortage cost    : " << best_polished.shortage_cost << "\n";
+    std::cout << "  pack types       : " << best_polished.content.size()
+              << "\n";
+    std::cout << "  allocated packs  : " << best_polished.allocated_packs
+              << "\n";
+    std::cout << "  overstock units  : " << best_polished.overstock_units
+              << "\n";
+    std::cout << "  shortage units   : " << best_polished.shortage_units
+              << "\n";
+    std::cout << "\nDone.\n";
+
   } catch (const std::exception &ex) {
     std::cerr << "ERROR: " << ex.what() << "\n";
     return 1;

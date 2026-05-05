@@ -1,0 +1,14 @@
+metric,value
+total_cost,277896
+setup_cost,90450
+handling_cost,54322.8
+capital_cost,133123
+shortage_cost,0
+pack_types_used,675
+allocated_packs_total,4925
+forecast_units_total,67951
+shipped_units_total,85640
+overstock_units_total,17689
+shortage_units_total,0
+baseline_no_packs_handling_cost,749500
+estimated_savings_vs_unit_handling_only,471603

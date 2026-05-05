@@ -146,6 +146,7 @@ struct Args {
   int min_forecast = 1;
   bool export_solution = true;
   bool allow_shortage = true;
+  bool adaptive_weights = true;
 };
 
 // =============================================================================
@@ -1368,11 +1369,13 @@ static Solution enforce_pack_type_limit(
 
 static std::mutex cout_mutex;
 
-static std::pair<Solution, std::vector<LogRow>> optimize_metaheuristic(
-    const ProblemData &data, int iterations, int restarts, int seed,
-    double initial_temperature, double cooling_rate, int n_seed_packs,
-    const std::optional<int> &time_limit,
-    const std::optional<int> &max_pack_types, const bool allow_shortage) {
+static std::pair<Solution, std::vector<LogRow>>
+optimize_metaheuristic(const ProblemData &data, int iterations, int restarts,
+                       int seed, double initial_temperature,
+                       double cooling_rate, int n_seed_packs,
+                       const std::optional<int> &time_limit,
+                       const std::optional<int> &max_pack_types,
+                       const bool allow_shortage, const bool adaptive_weights) {
   auto start = std::chrono::steady_clock::now();
   std::mt19937 global_rng(seed);
 
@@ -1449,7 +1452,8 @@ static std::pair<Solution, std::vector<LogRow>> optimize_metaheuristic(
 
       if (candidate.cost < best_restart.cost) {
         best_restart = candidate;
-        operator_weights[op_name] = operator_weights[op_name] * 1.03;
+        double weight = (adaptive_weights) ? 1.03 : 1.00;
+        operator_weights[op_name] = operator_weights[op_name] * weight;
 
         std::lock_guard<std::mutex> lock(global_best_mutex);
         if (best_restart.cost < best_global_cost) {
@@ -1748,6 +1752,8 @@ static void print_usage(const char *exe) {
       << "  --no-export                  Do not write CSV outputs\n"
       << "  --no-shortage                No shortage allowed in the final "
          "solution\n"
+      << "  --no-adaptive-weights        Disable adaptive weights for "
+         "operators in metaheuristic\n"
       << "  --help                       Show this help\n";
 }
 
@@ -1793,6 +1799,8 @@ static Args parse_args(int argc, char **argv) {
       args.export_solution = false;
     else if (key == "--no-shortage")
       args.allow_shortage = false;
+    else if (key == "--no-adaptive-weights")
+      args.adaptive_weights = false;
     else
       throw std::runtime_error("Unknown argument: " + key);
   }
@@ -1829,12 +1837,17 @@ int main(int argc, char **argv) {
     std::cout << "Shortage allowed     : "
               << (args.allow_shortage ? std::string("Yes") : std::string("No"))
               << "\n";
+    std::cout << "Adaptive weights     : "
+              << (args.adaptive_weights ? std::string("Yes")
+                                        : std::string("No"))
+              << "\n";
     std::cout << std::string(78, '=') << "\n";
 
     auto [best, run_log] = optimize_metaheuristic(
         data, args.iterations, args.restarts, args.seed,
         args.initial_temperature, args.cooling_rate, args.seed_packs,
-        args.time_limit, args.max_pack_types, args.allow_shortage);
+        args.time_limit, args.max_pack_types, args.allow_shortage,
+        args.adaptive_weights);
 
     std::cout << "\nFinal solution:\n";
     std::cout << "  total cost       : " << std::fixed << std::setprecision(2)

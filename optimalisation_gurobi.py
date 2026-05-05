@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """
+GROUP 15
 optimalisation.py
 
 Pre-pack optimization for the Sustainable Essentials SCM group assignment.
@@ -88,7 +89,7 @@ SHORTAGE_PENALTY_PER_UNIT = 10_000.00
 MAX_PACK_TYPES = None
 MAX_PACK_UNITS = 100000
 MAX_DISTINCT_SKUS_PER_PACK = 100000
-MAX_CANDIDATE_PACKS = 50_000_000
+MAX_CANDIDATE_PACKS = 500_000_000_000_000
 
 # The template shown in the assignment starts with one pack row per SKU.
 # Keeping at most one pack type per SKU is a good practical limit for the

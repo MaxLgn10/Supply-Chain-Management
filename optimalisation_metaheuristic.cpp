@@ -1,7 +1,6 @@
 /*
+GROUP 15
 optimalisation_metaheuristic.cpp
-
-C++ translation of optimalisation_metaheuristic.py.
 
 Purpose:
   Metaheuristic pre-pack optimizer for the SCM group assignment. It jointly
@@ -9,13 +8,10 @@ Purpose:
   randomized greedy repair, ALNS-style neighborhood operators, and simulated
   annealing acceptance.
 
-Important translation notes:
-  - The Python version used pandas and openpyxl for Excel input/output. Standard
-    C++ has no built-in Excel reader/writer, so this translation supports CSV
+Important  notes:
+  - Standard C++ has no built-in Excel reader/writer, so this code supports CSV
     input and CSV output. If --products points to a CSV with columns id,cost,
     product costs are loaded; otherwise all unit costs are set to 1.
-  - The official XLSX solution template filling from the Python version is not
-    implemented here. The optimizer writes the same main CSV outputs.
 
 Compile:
   g++ -std=c++17 -O2 -Wall -Wextra -pedantic optimalisation_metaheuristic.cpp -o
@@ -32,6 +28,9 @@ Run:
 Recommended stronger run:
   ./optimalisation_metaheuristic --iterations 50000 --restarts 8 --time-limit
 1800
+
+For more info about all parameters, run:
+  ./optimalisation_metaheuristic --help
 */
 
 #include <algorithm>
